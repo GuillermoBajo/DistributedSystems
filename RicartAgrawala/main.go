@@ -58,7 +58,6 @@ func lector(me int, gestF gf.GestorFichero, rasdb *ra.RASharedDB, wg *sync.WaitG
 	}
 }
 
-
 func main() {
 	myFile := "p2_" + os.Args[1] + ".txt"
 	gFich := gf.New(myFile)
