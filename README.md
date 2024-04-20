@@ -1,2 +1,2 @@
-# Distributed Systems
-This repository features implementations of popular distributed systems algorithms such as Raft with Kubernetes integration and the Ricart-Agrawala algorithm in Go.
+# Sistemas distribuidos
+Este repositorio contiene implementaciones de algoritmos populares de sistemas distribuidos. Incluye el algoritmo de consenso Raft con integración de Kubernetes y el algoritmo Ricart-Agrawala en Go para exclusión mutua distribuida. Estos ejemplos ilustran los conceptos clave de los sistemas distribuidos y ofrecen oportunidades para experimentar y aprender sobre el diseño y la operación de sistemas distribuidos.
