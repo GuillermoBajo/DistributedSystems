@@ -12,7 +12,7 @@ import (
 )
 
 type FileUpdate struct {
-	Fragment string
+	Fragment string 
 }
 
 type Barrier struct{}
@@ -57,6 +57,7 @@ func lector(me int, gestF gf.GestorFichero, rasdb *ra.RASharedDB, wg *sync.WaitG
 		rasdb.PostProtocol()
 	}
 }
+
 
 func main() {
 	myFile := "p2_" + os.Args[1] + ".txt"
