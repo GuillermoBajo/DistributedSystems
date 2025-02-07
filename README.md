@@ -1,17 +1,17 @@
-# Sistemas Distribuidos
+# Distributed Systems
 
-Este repositorio contiene implementaciones de algoritmos populares de sistemas distribuidos. Incluye el **algoritmo de consenso Raft con integración de Kubernetes** y el **Ricart-Agrawala** en Go para exclusión mutua distribuida.
+This repository contains implementations of popular distributed systems algorithms. It includes the **Raft consensus algorithm with Kubernetes integration** and **Ricart-Agrawala** in Go for distributed mutual exclusion.
 
 ## **Ricart-Agrawala**:
 
-- Permite la exclusión mutua en sistemas distribuidos sin un coordinador central.
-- Utiliza mensajes de solicitud, permiso y liberación para controlar el acceso a recursos compartidos.
-- Reduce la cantidad de mensajes necesarios en comparación con otros algoritmos de exclusión mutua distribuidos.
-- Garantiza la equidad en el acceso a los recursos entre los nodos participantes.
+- Enables mutual exclusion in distributed systems without a central coordinator.
+- Uses request, permission, and release messages to control access to shared resources.
+- Reduces the number of messages required compared to other distributed mutual exclusion algorithms.
+- Ensures fairness in resource access among participating nodes.
 
-## **Raft con Kubernetes**:
+## **Raft with Kubernetes**:
 
-- Proporciona un protocolo de consenso robusto para garantizar la consistencia de datos en sistemas distribuidos.
-- Simplifica el despliegue y la gestión de clústeres con Kubernetes.
-- Permite la recuperación automática ante fallos mediante la elección de líderes y la replicación de registros.
-- Ofrece una solución escalable para la gestión y orquestación de contenedores.
+- Provides a robust consensus protocol to ensure data consistency in distributed systems.
+- Simplifies cluster deployment and management with Kubernetes.
+- Enables automatic failure recovery through leader election and log replication.
+- Offers a scalable solution for container management and orchestration.
