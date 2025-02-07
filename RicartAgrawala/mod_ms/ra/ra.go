@@ -1,10 +1,5 @@
 /*
-* AUTOR: Rafael Tolosana Calasanz
-* ASIGNATURA: 30221 Sistemas Distribuidos del Grado en Ingeniería Informática
-*			Escuela de Ingeniería y Arquitectura - Universidad de Zaragoza
-* FECHA: septiembre de 2021
-* FICHERO: ricart-agrawala.go
-* DESCRIPCIÓN: Implementación del algoritmo de Ricart-Agrawala Generalizado en Go
+* Description: Implementation of the Generalized Ricart-Agrawala algorithm in Go.
  */
 package ra
 

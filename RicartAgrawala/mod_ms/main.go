@@ -11,12 +11,15 @@ import (
 	"time"
 )
 
+// Struct for file update message
 type FileUpdate struct {
 	Fragment string
 }
 
+// Struct for synchronization barrier
 type Barrier struct{}
 
+// Check for errors, exit program if there is an error
 func checkError(err error) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Fatal error: %s", err.Error())
@@ -24,69 +27,82 @@ func checkError(err error) {
 	}
 }
 
+// Writer process: this process writes to the file and uses Ricart-Agrawala protocol for mutual exclusion.
 func escritor(me int, gestF gf.GestorFichero, rasdb *ra.RASharedDB, mSys *ms.MessageSystem, wg *sync.WaitGroup, writeMutex *sync.Mutex) {
-	frag := "a"
+	frag := "a" // Fragment content to write
 	for {
-		// Preprotocol de Ricart-Agrawala. Espera a que se le conceda el acceso a la sección crítica.
+		// Pre-protocol of Ricart-Agrawala: Wait until access to the critical section is granted
 		rasdb.PreProtocol()
-		// Exclusion mutua en escritura fichero local
+
+		// Mutual exclusion for writing to the local file
 		writeMutex.Lock()
 		gestF.EscribirFichero(frag)
 		writeMutex.Unlock()
 
-		// Notifica a los procesos el cambio
+		// Notify other processes of the change
 		for i := 1; i <= ra.N; i++ {
 			if i != me {
 				mSys.Send(i, FileUpdate{frag})
 			}
 		}
-		// Postprotocol de Ricart-Agrawala. Libera el acceso a la sección crítica. Los otros procesos podran
-		// leer-escribir en el fichero.
+
+		// Post-protocol of Ricart-Agrawala: Release access to the critical section, other processes can read/write to the file
 		rasdb.PostProtocol()
 	}
 }
 
+// Reader process: this process only reads from the file.
 func lector(me int, gestF gf.GestorFichero, rasdb *ra.RASharedDB, wg *sync.WaitGroup, writeMutex *sync.Mutex) {
 	for {
 		rasdb.PreProtocol()
-		_ = gestF.LeerFichero()
+		_ = gestF.LeerFichero() // Read the file
 		rasdb.PostProtocol()
 	}
 }
 
 func main() {
+	// Define file name based on the passed arguments
 	myFile := "p2_" + os.Args[1] + ".txt"
 	gFich := gf.New(myFile)
 
+	// Get process ID and check for errors
 	myPID, err := strconv.Atoi(os.Args[1])
 	checkError(err)
 	usersFile := os.Args[2]
 
+	// Initialize channels for message passing
 	reqChan := make(chan ra.Request)
 	replChan := make(chan ra.Reply)
 	mSys := ms.New(myPID, usersFile, []ms.Message{ra.Request{}, ra.Reply{}, FileUpdate{}, Barrier{}})
 
+	// Initialize shared database for Ricart-Agrawala protocol
 	ras := ra.New(myPID, usersFile, &mSys, reqChan, replChan)
 
+	// Initialize synchronization barrier and mutex for file writing
 	syncBarrier := make(chan bool)
 	writeMutex := sync.Mutex{}
 	go handleMessages(&mSys, reqChan, replChan, syncBarrier, gFich, &writeMutex)
 
+	// Barrier synchronization before starting processes
 	barrera(&mSys, syncBarrier, myPID)
 
+	// WaitGroup for synchronization between processes
 	var wg sync.WaitGroup
 	wg.Add(1)
-	// barrera
+
+	// Choose whether the process is a writer or reader based on its PID
 	if ra.N/2 > myPID {
-		go escritor(myPID, *gFich, ras, &mSys, &wg, &writeMutex)
+		go escritor(myPID, *gFich, ras, &mSys, &wg, &writeMutex) // Writer process
 	} else {
-		go lector(myPID, *gFich, ras, &wg, &writeMutex)
+		go lector(myPID, *gFich, ras, &wg, &writeMutex) // Reader process
 	}
 
+	// Wait for the processes to complete
 	wg.Wait()
 	fmt.Println("Done")
 }
 
+// Function to handle incoming messages and process them accordingly
 func handleMessages(mSys *ms.MessageSystem, reqChan chan ra.Request, replChan chan ra.Reply, syncBarrier chan bool, gFich *gf.GestorFichero, writeMutex *sync.Mutex) {
 	for {
 		msg := mSys.Receive()
@@ -105,45 +121,18 @@ func handleMessages(mSys *ms.MessageSystem, reqChan chan ra.Request, replChan ch
 	}
 }
 
+// Barrier synchronization function: ensures all processes reach the barrier before continuing
 func barrera(mSys *ms.MessageSystem, syncBarrier chan bool, myPID int) {
 	time.Sleep(1 * time.Second)
 	for i := 1; i <= ra.N; i++ {
 		if i != myPID {
-			mSys.Send(i, Barrier{})
+			mSys.Send(i, Barrier{}) // Send barrier message to other processes
 		}
 	}
 	num_ack := 0
 	for num_ack < ra.N-1 {
-		<-syncBarrier
+		<-syncBarrier // Wait for acknowledgements from other processes
 		num_ack++
 	}
-	fmt.Println(myPID, " - barrera superada")
+	fmt.Println(myPID, " - barrier passed") // Barrier passed by this process
 }
-
-// type MessageHandler struct {
-// 	SendRequest 	chan ra.Request
-// 	SendReply   	chan ra.Reply
-// 	ReceiveRequest 	chan ra.Request
-// 	ReceiveReply   	chan ra.Reply
-
-// 	SendFileUpdate 	chan FileUpdate
-// 	ReceiveFileUpdate 	chan FileUpdate
-
-// 	SendBarrier 	chan Barrier
-// 	ReceiveBarrier 	chan Barrier
-// }
-
-// func NewMessageHandler(mSys *ms.MessageSystem) *MessageHandler {
-// 	return &MessageHandler{
-// 		SendRequest: 	make(chan ra.Request),
-// 		SendReply:   	make(chan ra.Reply),
-// 		ReceiveRequest: make(chan ra.Request),
-// 		ReceiveReply:   make(chan ra.Reply),
-
-// 		SendFileUpdate: 	make(chan FileUpdate),
-// 		ReceiveFileUpdate: 	make(chan FileUpdate),
-
-// 		SendBarrier: 	make(chan Barrier),
-// 		ReceiveBarrier: 	make(chan Barrier),
-// 	}
-// }

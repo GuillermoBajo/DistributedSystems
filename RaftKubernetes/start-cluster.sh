@@ -1,10 +1,10 @@
-# echo -e "Eliminando cluster"
+# echo -e "Deleting cluster"
 # ./delete-cluster.sh
 
-# echo -e "\nCreando cluster"
+# echo -e "\Creating cluster"
 # ./kind-with-registry.sh
 
-echo -e "\nCompilando cliente"
+echo -e "\nCompiling clinet"
 rm  ./cliente/cltraft >/dev/null 2>&1
 cd ./raft
 CGO_ENABLED=0 go build -o ./../cliente/cltraft ./pkg/cltraft/cltraft.go

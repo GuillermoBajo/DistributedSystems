@@ -1,140 +1,129 @@
-// Escribir vuestro código de funcionalidad Raft en este fichero
+// Write your Raft functionality code in this file
 //
 
 package raft
 
-//
 // API
 // ===
-// Este es el API que vuestra implementación debe exportar
+// This is the API that your implementation should export
 //
 // nodoRaft = NuevoNodo(...)
-//   Crear un nuevo servidor del grupo de elección.
+//   Create a new server in the election group.
 //
 // nodoRaft.Para()
-//   Solicitar la parado de un servidor
+//   Request the stop of a server
 //
 // nodo.ObtenerEstado() (yo, mandato, esLider)
-//   Solicitar a un nodo de elección por "yo", su mandato en curso,
-//   y si piensa que es el msmo el lider
+//   Request the state of a node by "yo", its current term, and whether it thinks it is the leader
 //
 // nodoRaft.SometerOperacion(operacion interface()) (indice, mandato, esLider)
 
 // type AplicaOperacion
 
 import (
-	// "errors"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"math/rand"
 	"os"
 
-	//"crypto/rand"
 	"sync"
 	"time"
 
-	//"net/rpc"
-
-	//"raft/internal/comun/check"
 	"raft/internal/comun/rpctimeout"
 )
 
 const (
-	// Constante para fijar valor entero no inicializado
+	// Constant to set uninitialized integer value
 	IntNOINICIALIZADO = -1
 
-	//  false deshabilita por completo los logs de depuracion
-	// Aseguraros de poner kEnableDebugLogs a false antes de la entrega
+	// false disables debugging logs completely
+	// Ensure kEnableDebugLogs is set to false before delivery
 	kEnableDebugLogs = true
 
-	// Poner a true para logear a stdout en lugar de a fichero
+	// Set to true to log to stdout instead of a file
 	kLogToStdout = false
 
-	// Cambiar esto para salida de logs en un directorio diferente
+	// Change this to a different directory for log output
 	kLogOutputDir = "./logs_raft/"
 
-	// Tiempo de espera para la reeleccion
+	// Timeout for re-election
 	ReelectionTimer = 2.5
-
 )
 
+// Operation Type: Possible operations are "read" and "write"
 type TipoOperacion struct {
-	Operacion string // La operaciones posibles son "leer" y "escribir"
-	Clave     string // en el caso de la lectura Clave = ""
-	Valor     string // en el caso de la lectura Valor = ""
+	Operacion string // The possible operations are "leer" (read) and "escribir" (write)
+	Clave     string // For reading, Clave = ""
+	Valor     string // For reading, Valor = ""
 }
 
-// A medida que el nodo Raft conoce las operaciones de las  entradas de registro
-// comprometidas, envía un AplicaOperacion, con cada una de ellas, al canal
-// "canalAplicar" (funcion NuevoNodo) de la maquina de estados
+// As the Raft node learns about committed log entries,
+// it sends an AplicaOperacion with each of them to the "canalAplicar" channel (from NuevoNodo function) of the state machine
 type AplicaOperacion struct {
-	Indice    int // en la entrada de registro
-	Operacion TipoOperacion // Operacion a aplicar
+	Indice    int           // Log entry index
+	Operacion TipoOperacion // The operation to be applied
 }
 
 type Entry struct {
-	Term      int           // Term en el que se ha creado la entrada
-	Operacion TipoOperacion // Operacion a realizar
-	Index	  int 			// Indice de la entrada
+	Term      int           // Term in which the entry was created
+	Operacion TipoOperacion // The operation to perform
+	Index	  int 			// Log entry index
 }
 
-// Tipo de dato Go que representa un solo nodo (réplica) de raft
+// Go data type representing a single Raft node (replica)
 type NodoRaft struct {
-	Mux sync.Mutex // Mutex para proteger acceso a estado compartido
+	Mux sync.Mutex // Mutex to protect access to shared state
 
-	// Host:Port de todos los nodos (réplicas) Raft, en mismo orden
-	Nodos   []rpctimeout.HostPort 	// Host:Port de todos los nodos (réplicas) Raft, en mismo orden
-	Yo      int 					// indice de este nodos en campo array "nodos"
-	IdLider int 					// indice del lider en campo array "nodos"
+	// Host:Port of all Raft nodes (replicas), in the same order
+	Nodos   []rpctimeout.HostPort 	// Host:Port of all Raft nodes (replicas), in the same order
+	Yo      int 					// Index of this node in the "nodos" array
+	IdLider int 					// Index of the leader node in the "nodos" array
 
-	// Utilización opcional de este logger para depuración
-	// Cada nodo Raft tiene su propio registro de trazas (logs)
+	// Optional logger for debugging
+	// Each Raft node has its own trace log
 	Logger *log.Logger
 
-	// Vuestros datos aqui.
-	FollowerChan chan bool // Canal para pasar a follower
-	LeaderChan   chan bool // Canal para pasar a leader
-	Heartbeat    chan bool // Canal para enviar heartbeats
+	// Your custom data here
+	FollowerChan chan bool // Channel to switch to follower role
+	LeaderChan   chan bool // Channel to switch to leader role
+	Heartbeat    chan bool // Channel to send heartbeats
 
-	Rol string // Rol del nodo (Follower, Candidate, Leader)
+	Rol string // Node's role (Follower, Candidate, Leader)
 
 	// RaftState
-	CurrentTerm int 		// Ultimo mandato conocido
-	VotedFor    int 		// Indice del nodo al que se ha votado en el mandato. Lider en ese momento.
-	Log 		[]Entry		// Entradas de registro.
+	CurrentTerm int 		// Last known term
+	VotedFor    int 		// Index of the node voted for in the current term
+	Log 		[]Entry		// Log entries
 
 	// NodeState
-	CommitIndex int 		// Indice del registro mas alto conocido que se ha comprometido
-	LastApplied int 		// Indice del registro mas alto conocido que se ha aplicado a la maquina de estados
-	NumVotes    int 		// Numero de votos recibidos en la eleccion actual
-	NumSucess   int			// Numero de sucess recibidos en el appendEntries 
+	CommitIndex int 		// Highest known index of committed log entries
+	LastApplied int 		// Highest known index of applied log entries
+	NumVotes    int 		// Number of votes received in the current election
+	NumSucess   int			// Number of success responses in appendEntries
 
 	// LeaderState
-	NextIndex  []int 		// Para cada nodo, indice del siguiente registro a enviar. Inicializado a LastLogIndex + 1
-	MatchIndex []int 		// Para cada nodo, indice del ultimo registro que se sabe que el nodo ha replicado en el cluster. Inicializado a 0
+	NextIndex  []int 		// For each node, the index of the next log entry to send, initialized to LastLogIndex + 1
+	MatchIndex []int 		// For each node, the index of the last log entry known to be replicated, initialized to 0
 
-	AplicarOperacion chan AplicaOperacion // Canal para pasar operaciones a aplicar a la maquina de estados
-	Commited   		 chan string		  // Canal para pasar el valor a devolver al cliente
+	AplicarOperacion chan AplicaOperacion // Channel for operations to be applied to the state machine
+	Commited   		 chan string		  // Channel for the value to be returned to the client
 
-	alive bool	// Para saber si el nodo esta vivo o no
+	alive bool	// Indicates if the node is alive or not
 }
 
+// Creation of a new Raft node
+//
+// Table of <IP Address:port> of each node, including itself.
+//
+// The <IP Address:port> of this node is in "nodos[yo]"
+//
+// All "nodos[]" arrays of the nodes have the same order
 
-// Creacion de un nuevo nodo de eleccion
+// canalAplicar is a channel where, in practice 5, operations to apply to the state machine will be received.
+// It can be assumed that this channel will be consumed continuously.
 //
-// Tabla de <Direccion IP:puerto> de cada nodo incluido a si mismo.
-//
-// <Direccion IP:puerto> de este nodo esta en nodos[yo]
-//
-// Todos los arrays nodos[] de los nodos tienen el mismo orden
-
-// canalAplicar es un canal donde, en la practica 5, se recogerán las
-// operaciones a aplicar a la máquina de estados. Se puede asumir que
-// este canal se consumira de forma continúa.
-//
-// NuevoNodo() debe devolver resultado rápido, por lo que se deberían
-// poner en marcha Gorutinas para trabajos de larga duracion
+// NuevoNodo() should return quickly, so long-running tasks should be started in Goroutines
 func NuevoNodo(nodos []rpctimeout.HostPort, yo int,
 	canalAplicarOperacion chan AplicaOperacion) *NodoRaft {
 	nr := &NodoRaft{}
@@ -142,6 +131,7 @@ func NuevoNodo(nodos []rpctimeout.HostPort, yo int,
 	nr.Yo = yo
 	nr.IdLider = -1
 
+	// Setting up the logger for debugging
 	if kEnableDebugLogs {
 		nombreNodo := nodos[yo].Host() + "_" + nodos[yo].Port()
 		logPrefix := fmt.Sprintf("%s", nombreNodo)
@@ -165,11 +155,11 @@ func NuevoNodo(nodos []rpctimeout.HostPort, yo int,
 				logPrefix+" -> ", log.Lmicroseconds|log.Lshortfile)
 		}
 		nr.Logger.Println("logger initialized")
-	}else {
+	} else {
 		nr.Logger = log.New(ioutil.Discard, "", 0)
 	}
 
-	// Codigo de inicialización de los atributos de un nodo Raft
+	// Initializing Raft node attributes
 	nr.FollowerChan = make(chan bool)
 	nr.LeaderChan = make(chan bool)
 	nr.Heartbeat = make(chan bool)
@@ -191,153 +181,144 @@ func NuevoNodo(nodos []rpctimeout.HostPort, yo int,
 	nr.AplicarOperacion = canalAplicarOperacion
 	nr.Commited = make(chan string)
 
+	// Delay to ensure proper initialization
 	time.Sleep(3 * time.Second)
 	go nr.automataRaft()
 
 	return nr
 }
 
-
-
-// para es un método que detiene la ejecución del nodo actual.
-// Crea una goroutine que duerme durante 5 milisegundos y luego sale del programa.
+// "para" is a method that stops the current node execution.
+// It creates a Goroutine that sleeps for 5 milliseconds and then exits the program.
 func (nr *NodoRaft) para() {
 	go func() { time.Sleep(5 * time.Millisecond); os.Exit(0) }()
 }
 
-
-// obtenerEstado devuelve el estado actual del nodo Raft.
-// Devuelve los siguientes valores:
-// - yo: el identificador del nodo.
-// - mandato: el término actual del nodo.
-// - esLider: un indicador booleano que indica si el nodo es el líder.
-// - idLider: el identificador del líder actual.
+// obtenerEstado (Get Node State) returns the current state of the Raft node.
+// It returns the following values:
+// - yo: the node's identifier (index in the node list).
+// - mandato: the current term of the node.
+// - esLider: a boolean indicating whether the node is the leader.
+// - idLider: the identifier of the current leader.
 func (nr *NodoRaft) obtenerEstado() (int, int, bool, int) {
 	var yo int = nr.Yo
 	var mandato int = nr.CurrentTerm
 	var esLider bool
 	var idLider int = nr.IdLider
 
+	// Check if the current node is the leader
 	if nr.Yo == nr.IdLider {
 		esLider = true
-	}else {
+	} else {
 		esLider = false
 	}
+	// Return the node state
 	return yo, mandato, esLider, idLider
 }
 
-
-// El servicio que utilice Raft (base de datos clave/valor, por ejemplo)
-// Quiere buscar un acuerdo de posicion en registro para siguiente operacion
-// solicitada por cliente.
-
-// Si el nodo no es el lider, devolver falso
-// Sino, comenzar la operacion de consenso sobre la operacion y devolver en
-// cuanto se consiga
-//
-// No hay garantia que esta operacion consiga comprometerse en una entrada de
-// de registro, dado que el lider puede fallar y la entrada ser reemplazada
-// en el futuro.
-// Primer valor devuelto es el indice del registro donde se va a colocar
-// la operacion si consigue comprometerse.
-// El segundo valor es el mandato en curso
-// El tercer valor es true si el nodo cree ser el lider
-// Cuarto valor es el lider, es el indice del líder si no es él
+// someterOperacion (Submit Operation) is a method that submits an operation
+// (such as a read or write operation on a key-value store) to the Raft node.
+// If the node is the leader, the operation is added to the log and committed.
+// It returns the index of the log entry, the current term, whether the node is the leader,
+// the leader's ID, and the result value.
 func (nr *NodoRaft) someterOperacion(operacion TipoOperacion) (int, int, bool, int, string) {
-	// Si el nodo no está activo, esperar y devolver un resultado indicando que está muerto
+	// If the node is not active, wait and return a result indicating that it's dead
 	if !nr.alive {
 		time.Sleep(400 * time.Millisecond)
-		return -1, -1, false, -1, "muerto"
+		return -1, -1, false, -1, "dead"
 	}
 
-	// Inicializar variables
+	// Initialize variables
 	indice := -1
 	mandato := nr.CurrentTerm
 	EsLider := nr.Yo == nr.IdLider
 	idLider := nr.IdLider
 	valorADevolver := ""
 
-	// Verificar si el nodo actual es el líder
+	// If the current node is the leader, process the operation
 	if EsLider {
-		// Bloquear el acceso al log mientras se realiza la operación
+		// Lock access to the log while performing the operation
 		nr.Mux.Lock()
 
-		// Obtener el índice actualizado después de la operación
+		// Get the updated index after the operation
 		indice = nr.CommitIndex
-		// Crear una nueva entrada en el log con la operación proporcionada
+		// Create a new log entry with the provided operation
 		entry := Entry{Term: mandato, Operacion: operacion, Index: indice}
-		// Agregar la entrada al log
+		// Add the entry to the log
 		nr.Log = append(nr.Log, entry)
 
-		// Registrar la operación y el estado actualizado del log
-		nr.Logger.Printf("Entrada añadida al log, ENTRADA NUEVA: (Indice: %d, Mandato: %d, Operacion: %s, Valor: %s, Clave: %s)\n"+
-			"Log actualizado, actualmente es: %v\n", entry.Index, entry.Term, entry.Operacion.Operacion, entry.Operacion.Valor, entry.Operacion.Clave, nr.Log)
+		// Log the operation and the updated log state
+		nr.Logger.Printf("New log entry added, ENTRY: (Index: %d, Term: %d, Operation: %s, Value: %s, Key: %s)\n"+
+			"Log updated: %v\n", entry.Index, entry.Term, entry.Operacion.Operacion, entry.Operacion.Valor, entry.Operacion.Clave, nr.Log)
 
-		// Desbloquear el acceso al log
+		// Unlock access to the log
 		nr.Mux.Unlock()
 
-		// Esperar a que la operación se confirme y obtener el valor devuelto
+		// Wait for the operation to be committed and get the returned value
 		valorADevolver = <-nr.Commited
-		// Actualizar el ID del líder
+		// Update the leader ID
 		idLider = nr.Yo
 	}
 
-	// Devolver los resultados del proceso de sometimiento de operación
+	// Return the results of the operation submission
 	return indice, mandato, EsLider, idLider, valorADevolver
 }
 
+// ------------------------------------------
+// RPC CALLS TO RAFT API
 
-// -----------------------------------------------------------------------
-// LLAMADAS RPC al API
-//
-// Si no tenemos argumentos o respuesta estructura vacia (tamaño cero)
+// The structure for empty arguments or response, when no arguments or empty response structures are used (size zero).
 type Vacio struct{}
 
-// ParaNodo detiene el nodo Raft.
+// ParaNodo (Stop Node) is an RPC method to stop the Raft node.
 func (nr *NodoRaft) ParaNodo(args Vacio, reply *Vacio) error {
 	defer nr.para()
 	return nil
 }
 
+// EstadoParcial (Partial State) contains the current term, whether the node is the leader, and the leader's ID.
 type EstadoParcial struct {
 	Mandato int
 	EsLider bool
 	IdLider int
 }
 
+// EstadoRemoto (Remote State) contains the ID of the node and the partial state.
 type EstadoRemoto struct {
 	IdNodo int
 	EstadoParcial
 }
 
+// ResultadoRemoto (Remote Result) contains the result of an operation along with the current state.
 type ResultadoRemoto struct {
 	ValorADevolver string
 	IndiceRegistro int
 	EstadoParcial
 }
 
+// ResultadoRegistro (Log Entry Result) contains the index and term of a log entry.
 type ResultadoRegistro struct {
 	Index int
 	Term  int
 }
 
-// ObtenerEstadoNodo obtiene y devuelve el estado actual del nodo Raft.
+// ObtenerEstadoNodo (Get Node State) retrieves and returns the current state of the Raft node.
 func (nr *NodoRaft) ObtenerEstadoNodo(args Vacio, reply *EstadoRemoto) error {
-	// Obtener el estado del nodo y asignarlo a la respuesta remota
+	// Get the node's state and assign it to the remote response
 	reply.IdNodo, reply.Mandato, reply.EsLider, reply.IdLider = nr.obtenerEstado()
 	return nil
 }
 
-// ObtenerEstadoRegistro obtiene y devuelve el estado actual del registro del nodo Raft.
+// ObtenerEstadoRegistro (Get Log State) retrieves and returns the current state of the node's log.
 func (nr *NodoRaft) ObtenerEstadoRegistro(args Vacio, reply *ResultadoRegistro) error {
-	// Bloquear el acceso al log mientras se obtiene el estado del registro
+	// Lock the log while retrieving the current state
 	nr.Mux.Lock()
 	reply.Term, reply.Index = nr.getEstadoRegistro()
 	nr.Mux.Unlock()
 	return nil
 }
 
-// getEstadoRegistro devuelve el término y el índice del estado actual del registro del nodo Raft.
+// getEstadoRegistro (Get Log State) returns the term and index of the current log entry state.
 func (nr *NodoRaft) getEstadoRegistro() (int, int) {
 	if len(nr.Log) != 0 {
 		return nr.Log[nr.CommitIndex-1].Term, nr.CommitIndex
@@ -345,166 +326,150 @@ func (nr *NodoRaft) getEstadoRegistro() (int, int) {
 	return 0, -1
 }
 
-// SometerOperacionRaft lleva a cabo el proceso de sometimiento de una operación al nodo Raft.
+// SometerOperacionRaft (Submit Raft Operation) carries out the process of submitting an operation to the Raft node.
 func (nr *NodoRaft) SometerOperacionRaft(operacion TipoOperacion, reply *ResultadoRemoto) error {
-	// Obtener resultados del proceso de sometimiento de operación y asignarlos a la respuesta remota
+	// Get the results of the operation submission process and assign them to the remote response
 	reply.IndiceRegistro, reply.Mandato, reply.EsLider, reply.IdLider, reply.ValorADevolver = nr.someterOperacion(operacion)
 	return nil
 }
 
+// ------------------------------------------
+// RAFT PROTOCOL RPC CALLS
 
-// -----------------------------------------------------------------------
-// LLAMADAS RPC protocolo RAFT
-//
-// Structura de ejemplo de argumentos de RPC PedirVoto.
-//
-// Recordar
-// -----------
-// Nombres de campos deben comenzar con letra mayuscula !
+// ArgsPeticionVoto (Request Vote Arguments) contains the information needed for a vote request.
 type ArgsPeticionVoto struct {
-	// Vuestros datos aqui
-	Term         int // Termino del candidato
-	CandidateId  int // Id del candidato que solicita el voto
-	LastLogIndex int // Indice del ultimo registro del candidato
-	LastLogTerm  int // Termino del ultimo registro del candidato
+	// Your data here
+	Term         int // Term of the candidate
+	CandidateId  int // ID of the candidate requesting the vote
+	LastLogIndex int // Index of the candidate's last log entry
+	LastLogTerm  int // Term of the candidate's last log entry
 }
 
-// Structura de ejemplo de respuesta de RPC PedirVoto,
-//
-// Recordar
-// -----------
-// Nombres de campos deben comenzar con letra mayuscula !
+// RespuestaPeticionVoto (Vote Request Response) contains the response to a vote request.
 type RespuestaPeticionVoto struct {
-	// Vuestros datos aqui
-	Term        int  // Termino actual del nodo para que el candidato se actualice
-	VoteGranted bool // True si el voto se ha concedido
+	// Your data here
+	Term        int  // Current term of the node so that the candidate can update
+	VoteGranted bool // True if the vote was granted
 }
 
-
-// solicitarVotos es una función que se encarga de enviar solicitudes de voto a todos los nodos en el clúster.
-// Si el nodo no está activo, la función espera y sale.
-// Utiliza goroutines para enviar las solicitudes de voto de forma concurrente.
-// Registra la solicitud de voto enviada en el registro de eventos del nodo.
+// solicitarVotos (Request Votes) is a function that sends vote requests to all nodes in the cluster.
+// If the node is not active, the function waits and exits.
+// It uses goroutines to send vote requests concurrently.
 func solicitarVotos(nr *NodoRaft) {
-	// Si el nodo no está activo, esperar y salir de la función
+	// If the node is not active, wait and exit
 	if !nr.alive {
 		time.Sleep(400 * time.Millisecond)
 		return
 	}
 
-	// Declarar variables para la respuesta y el mutex
+	// Declare variables for the response and the mutex
 	var reply RespuestaPeticionVoto
 	var mx sync.Mutex
 
-	// Iterar sobre todos los nodos en el clúster
+	// Iterate through all nodes in the cluster
 	for i := 0; i < len(nr.Nodos); i++ {
-		// Evitar enviar una solicitud de voto a sí mismo
+		// Avoid sending a vote request to itself
 		if i != nr.Yo {
-			// Iniciar una goroutine para enviar la solicitud de voto al nodo i
+			// Start a goroutine to send the vote request to node i
 			go enviarPeticionVoto(nr, i, &mx, &reply, &ArgsPeticionVoto{
 				Term:         nr.CurrentTerm,
 				CandidateId:  nr.Yo,
 				LastLogIndex: len(nr.Log) - 1,
 				LastLogTerm:  0,
 			})
-			// Registrar la solicitud de voto enviada
-			nr.Logger.Printf("Peticion de voto enviada a %d. Los argumentos son: Term: %d, Yo: %d, LastLogIndex: %d, LastLogTerm: %d\n",
+			// Log the sent vote request
+			nr.Logger.Printf("Vote request sent to %d. Arguments: Term: %d, Yo: %d, LastLogIndex: %d, LastLogTerm: %d\n",
 				i, nr.CurrentTerm, nr.Yo, len(nr.Log), 0)
 		}
 	}
 }
 
-
-
-// enviarPeticionVoto envía una solicitud de voto al nodo especificado en el clúster Raft.
-// Devuelve true si la solicitud fue enviada y procesada correctamente, false en caso contrario.
+// enviarPeticionVoto sends a vote request to the specified node in the Raft cluster.
+// It returns true if the request was successfully sent and processed, false otherwise.
 func enviarPeticionVoto(nr *NodoRaft, node int, mx *sync.Mutex, reply *RespuestaPeticionVoto, args *ArgsPeticionVoto) bool {
-	// Si el nodo no está activo, esperar y devolver false
+	// If the node is not active, wait and return false
 	if !nr.alive {
 		time.Sleep(400 * time.Millisecond)
 		return false
 	}
 
-	// Actualizar LastLogTerm si el log no está vacío
+	// Update LastLogTerm if the log is not empty
 	if len(nr.Log) > 0 {
 		args.LastLogTerm = nr.Log[len(nr.Log)-1].Term
 	}
 
-	// Realizar la llamada remota para enviar la solicitud de voto al nodo
+	// Make the remote call to send the vote request to the node
 	err := nr.Nodos[node].CallTimeout("NodoRaft.PedirVoto", args, reply, 300*time.Millisecond)
 
-	// Verificar si hubo un error en la llamada remota
+	// Check if there was an error with the remote call
 	if err != nil {
 		return false
 	}
 
-	// Bloquear el acceso a secciones críticas con el mutex
+	// Lock access to critical sections using the mutex
 	mx.Lock()
 
-	// Actualizar el CurrentTerm si el término en la respuesta es mayor
+	// Update the CurrentTerm if the term in the reply is higher
 	if reply.Term > nr.CurrentTerm {
 		nr.CurrentTerm = reply.Term
-		nr.Logger.Printf("Su mandato es mayor: Mi mandato es: %d, el suyo es: %d (entonces, vuelvo a follower)\n", nr.CurrentTerm, reply.Term)
+		nr.Logger.Printf("Their term is greater: My term is: %d, theirs is: %d (so, I return to follower)\n", nr.CurrentTerm, reply.Term)
 		nr.FollowerChan <- true
 	} else if reply.VoteGranted {
-		// Si se otorga el voto, incrementar el contador de votos y verificar la mayoría
+		// If the vote is granted, increment the vote counter and check if the majority is reached
 		nr.NumVotes++
-		nr.Logger.Printf("Me ha concedido su voto %d\n", node)
-		// Si se alcanza la mayoría, el nodo se convierte en líder
+		nr.Logger.Printf("They granted me their vote %d\n", node)
+		// If majority is reached, the node becomes the leader
 		if nr.NumVotes > len(nr.Nodos)/2 {
 			nr.IdLider = nr.Yo
 			nr.LeaderChan <- true
 		}
 	} else {
-		// Si no se otorga el voto, volver a estado de seguidor
+		// If the vote is not granted, return to follower state
 		nr.FollowerChan <- true
 	}
 
-	// Desbloquear el acceso a secciones críticas
+	// Unlock the access to critical sections
 	mx.Unlock()
 
-	// Devolver true indicando que la solicitud fue enviada y procesada correctamente
+	// Return true indicating the request was sent and processed successfully
 	return true
 }
 
-
-
-// Metodo para RPC PedirVoto
-// PedirVoto procesa una solicitud de voto recibida de un candidato en el clúster Raft.
+// PedirVoto (Request Vote) processes a vote request received from a candidate in the Raft cluster.
 func (nr *NodoRaft) PedirVoto(peticion *ArgsPeticionVoto, reply *RespuestaPeticionVoto) error {
-	// Si el nodo no está activo, esperar y salir de la función sin procesar la solicitud
+	// If the node is not active, wait and exit the function without processing the request
 	if !nr.alive {
 		time.Sleep(500 * time.Millisecond)
 		return nil
 	}
 
-	// Bloquear el acceso al estado crítico del nodo con el mutex
+	// Lock access to the critical state of the node with the mutex
 	nr.Mux.Lock()
 
-	// Responder con false si el término en la solicitud es menor que el término actual
+	// Respond with false if the term in the request is less than the current term
 	if peticion.Term < nr.CurrentTerm {
 		reply.VoteGranted = false
 		reply.Term = nr.CurrentTerm
-		nr.Logger.Printf("Voto denegado a %d, porque su término es menor al mío\n", peticion.CandidateId)
+		nr.Logger.Printf("Vote denied to %d because their term is lower than mine\n", peticion.CandidateId)
 
-	// Verificar si el término en la solicitud es mayor y comprobaciones adicionales para conceder el voto
+	// If the term in the request is greater, and additional checks to grant the vote
 	} else if nr.CurrentTerm < peticion.Term && shouldGrantVote(nr, peticion) {
-		// Actualizar el término, otorgar el voto, y notificar el cambio a seguidor
+		// Update the term, grant the vote, and notify the state change to follower
 		nr.CurrentTerm = peticion.Term
 		reply.Term = nr.CurrentTerm
 		nr.VotedFor = peticion.CandidateId
-		nr.Logger.Printf("Voto concedido a %d\n", peticion.CandidateId)
+		nr.Logger.Printf("Vote granted to %d\n", peticion.CandidateId)
 		nr.FollowerChan <- true
 		reply.VoteGranted = true
 	}
 
-	// Desbloquear el acceso al estado crítico del nodo
+	// Unlock access to the critical state of the node
 	nr.Mux.Unlock()
 
 	return nil
 }
 
-// If voted for is null or candidateId, and candidates log is at least as up-to-date as receivers log, grant vote
+// If voted for is null or candidateId, and candidate's log is at least as up-to-date as the receiver's log, grant vote
 func shouldGrantVote(nr *NodoRaft, peticion *ArgsPeticionVoto) bool {
 	if nr.VotedFor == -1 || nr.VotedFor == peticion.CandidateId || len(nr.Log) == 0 || peticion.LastLogTerm >= nr.Log[len(nr.Log)-1].Term || 
 	(peticion.LastLogTerm == nr.Log[len(nr.Log)-1].Term && peticion.LastLogIndex >= len(nr.Log)-1) {
@@ -513,18 +478,16 @@ func shouldGrantVote(nr *NodoRaft, peticion *ArgsPeticionVoto) bool {
 	return false
 }
 
-
-
-// automataRaft es la implementación del autómata de estado del protocolo Raft para el nodo Raft.
-// Controla el comportamiento del nodo Raft en los diferentes roles: Follower, Candidate y Leader.
+// automataRaft is the implementation of the Raft protocol state machine for the Raft node.
+// It controls the behavior of the Raft node in different roles: Follower, Candidate, and Leader.
 func (nr *NodoRaft) automataRaft() {
-	// Identificación del nodo para mayor claridad en el log
-	nr.Logger.Printf("Soy el nodo %d\n", nr.Yo)
+	// Node identification for clarity in logs
+	nr.Logger.Printf("I am node %d\n", nr.Yo)
 
 	for {
-		// Verificar si el nodo está activo
+		// Check if the node is active
 		if nr.alive {
-			// Aplicar operaciones si hay cambios en el CommitIndex
+			// Apply operations if there are changes in the CommitIndex
 			if nr.CommitIndex > nr.LastApplied {
 				nr.Mux.Lock()
 				nr.LastApplied++
@@ -532,7 +495,7 @@ func (nr *NodoRaft) automataRaft() {
 				nr.Mux.Unlock()
 			}
 
-			// Si el nodo es seguidor;
+			// If the node is a follower;
 			if nr.Rol == "Follower" {
 				select {
 				case <-nr.Heartbeat:
@@ -540,20 +503,20 @@ func (nr *NodoRaft) automataRaft() {
 				case <-nr.FollowerChan:
 					nr.Rol = "Follower"
 				
-				// Si expira el timeout, el nodo se convierte en candidato
+				// If the timeout expires, the node becomes a candidate
 				case <-time.After(generarTimeout()):
 					if nr.alive {
 						nr.Mux.Lock()
 						nr.Rol = "Candidate"
 						nr.IdLider = -1
 						nr.Mux.Unlock()
-						nr.Logger.Printf("Timeout expirado. Paso a presentarme como candidato\n")
+						nr.Logger.Printf("Timeout expired. I am now running as a candidate\n")
 					}
 				}
 
-			// Si el nodo es candidato;
+			// If the node is a candidate;
 			} else if nr.Rol == "Candidate" {
-				// Iniciar el proceso de elección como candidato
+				// Start the election process as a candidate
 				nr.Mux.Lock()
 				nr.VotedFor = nr.Yo
 				nr.NumVotes = 1
@@ -561,21 +524,21 @@ func (nr *NodoRaft) automataRaft() {
 				nr.Mux.Unlock()
 				solicitarVotos(nr)
 
-				// Manejar eventos según el resultado de la elección
+				// Handle events based on the election result
 				select {
 				case <-nr.FollowerChan:
 					nr.Rol = "Follower"
 
 				case <-nr.Heartbeat:
-					nr.Logger.Printf("Soy candidato, pero recibo heartbeat, así que vuelvo a follower\n")
+					nr.Logger.Printf("I am a candidate, but I received a heartbeat, so I return to follower\n")
 					nr.Rol = "Follower"
 
-				// Si sale elegido lider;
+				// If elected leader;
 				case <-nr.LeaderChan:
 					nr.Rol = "Leader"
-					nr.Logger.Printf("Era candidato, pero me acaban de elegir líder\n")
+					nr.Logger.Printf("I was a candidate, but I was just elected leader\n")
 
-					// Configurar NextIndex y MatchIndex para replicación de logs
+					// Set NextIndex and MatchIndex for log replication
 					for i := 0; i < len(nr.Nodos); i++ {
 						if i != nr.Yo {
 							nr.Mux.Lock()
@@ -585,27 +548,27 @@ func (nr *NodoRaft) automataRaft() {
 						}
 					}
 
-				// Si expira el timeout, el nodo se vuelve a presentar como candidato
+				// If timeout expires, the node runs again as a candidate
 				case <-time.After(generarTimeout()):
 					nr.Rol = "Candidate"
-					nr.Logger.Printf("Timeout expirado, me presento nuevamente como candidato\n")
+					nr.Logger.Printf("Timeout expired, I am presenting myself again as a candidate\n")
 				}
 
-			// Si el nodo es líder;
+			// If the node is a leader;
 			} else if nr.Rol == "Leader" {
-				// Configurar el nodo como líder y enviar heartbeats
+				// Set the node as the leader and send heartbeats
 				nr.Mux.Lock()
 				nr.IdLider = nr.Yo
 				nr.Mux.Unlock()
 				enviaHeartbeats(nr)
 
-				// Manejar eventos según el rol actual
+				// Handle events based on the current role
 				select {
 				case <-nr.FollowerChan:
 					nr.Rol = "Follower"
 				case <-nr.Heartbeat:
 					nr.Rol = "Follower"
-					nr.Logger.Printf("Soy líder, pero recibo heartbeat, así que vuelvo a follower\n")
+					nr.Logger.Printf("I am the leader, but I received a heartbeat, so I return to follower\n")
 				case <-time.After(50 * time.Millisecond):
 					nr.Rol = "Leader"
 				}
@@ -615,255 +578,225 @@ func (nr *NodoRaft) automataRaft() {
 }
 
 
-
-// Funcion para enviar AppendEntries a todos los nodos
-// enviaHeartbeats envía heartbeats a otros nodos en el clúster Raft para mantener la comunicación y confirmar liderazgo.
-// enviaHeartbeats envía heartbeats a todos los nodos en el clúster Raft.
-// Si el nodo no está activo, se espera durante 400 milisegundos antes de enviar heartbeats.
-// Para cada nodo en el clúster, se inicia una goroutine para enviar heartbeats.
-// Si hay entradas nuevas en el log para enviar, se envían mediante AppendEntries.
-// Si no hay entradas nuevas, se envía un heartbeat.
-// El parámetro nr contiene la información del nodo Raft.
+// enviaHeartbeats sends heartbeats to all nodes in the Raft cluster.
+// If the node is not active, it waits for 400 milliseconds before sending heartbeats.
+// For each node in the cluster, a goroutine is started to send heartbeats.
+// If there are new log entries to send, they are sent via AppendEntries.
+// If no new entries, just send a heartbeat.
 func enviaHeartbeats(nr *NodoRaft) {
-	// Verificar si el nodo está activo antes de enviar heartbeats
-	if !nr.alive {
-		time.Sleep(400 * time.Millisecond)
-		return
-	}
+    // Check if the node is active before sending heartbeats
+    if !nr.alive {
+        time.Sleep(400 * time.Millisecond)
+        return
+    }
 
-	// Iterar sobre todos los nodos en el clúster Raft
-	for i := 0; i < len(nr.Nodos); i++ {
-		// Verificar si el índice actual en la iteración no es igual al índice del propio nodo
-		if i != nr.Yo {
-			// Iniciar una goroutine para enviar heartbeats al nodo actual
-			go func(node int) {
-				var result ResultsAE
-				var entradas []Entry
+    // Iterate over all nodes in the Raft cluster
+    for i := 0; i < len(nr.Nodos); i++ {
+        // Ensure the current index is not the same as the node's own index
+        if i != nr.Yo {
+            // Start a goroutine to send heartbeats to the current node
+            go func(node int) {
+                var result ResultsAE
+                var entradas []Entry
 
-				// Si hay nuevas entradas que aun no se han enviado al seguidor node:
-				if len(nr.Log) >= nr.NextIndex[node] {
-					for i := nr.NextIndex[node] - 1; i < len(nr.Log); i++ {
-						entrada := nr.Log[i]
-						nuevaEntrada := Entry{Term: entrada.Term, Operacion: entrada.Operacion, Index: entrada.Index,
-						}
-						entradas = append(entradas, nuevaEntrada)
-					}
+                // If there are new entries that haven't been sent to the follower node:
+                if len(nr.Log) >= nr.NextIndex[node] {
+                    for i := nr.NextIndex[node] - 1; i < len(nr.Log); i++ {
+                        entrada := nr.Log[i]
+                        nuevaEntrada := Entry{Term: entrada.Term, Operacion: entrada.Operacion, Index: entrada.Index}
+                        entradas = append(entradas, nuevaEntrada)
+                    }
 
-					if nr.NextIndex[node] > 1 {
-						entrada := ArgAppendEntries{nr.CurrentTerm, nr.Yo, nr.NextIndex[node] - 1, nr.Log[nr.NextIndex[node]-1].Term, entradas, nr.CommitIndex}
-						sendEntries(nr, node, &result, &entrada)
-					} else {
-						entrada := ArgAppendEntries{nr.CurrentTerm, nr.Yo, -1,  0, entradas, nr.CommitIndex}
-						sendEntries(nr, node, &result, &entrada)
-					}
-				// Sino, enviar un heartbeat
-				} else {
-					nr.Logger.Printf("Envio heartbeat a %d\n", node)
-					if nr.NextIndex[node] > 2 {
-						entrada := ArgAppendEntries{nr.CurrentTerm, nr.Yo, nr.NextIndex[node] - 1, nr.Log[nr.NextIndex[node]-2].Term, entradas, nr.CommitIndex}
-						sendHeartbeat(nr, node, &result, &entrada)
-					} else {
-						entrada := ArgAppendEntries{nr.CurrentTerm, nr.Yo, -1,  0, entradas, nr.CommitIndex}
-						sendHeartbeat(nr, node, &result, &entrada)
-					}
-				}
-			}(i)
-		}
-	}
+                    // If there are log entries, append them to the node
+                    if nr.NextIndex[node] > 1 {
+                        entrada := ArgAppendEntries{nr.CurrentTerm, nr.Yo, nr.NextIndex[node] - 1, nr.Log[nr.NextIndex[node]-1].Term, entradas, nr.CommitIndex}
+                        sendEntries(nr, node, &result, &entrada)
+                    } else {
+                        entrada := ArgAppendEntries{nr.CurrentTerm, nr.Yo, -1, 0, entradas, nr.CommitIndex}
+                        sendEntries(nr, node, &result, &entrada)
+                    }
+                // If no new entries, send a heartbeat
+                } else {
+                    nr.Logger.Printf("Sending heartbeat to %d\n", node)
+                    if nr.NextIndex[node] > 2 {
+                        entrada := ArgAppendEntries{nr.CurrentTerm, nr.Yo, nr.NextIndex[node] - 1, nr.Log[nr.NextIndex[node]-2].Term, entradas, nr.CommitIndex}
+                        sendHeartbeat(nr, node, &result, &entrada)
+                    } else {
+                        entrada := ArgAppendEntries{nr.CurrentTerm, nr.Yo, -1, 0, entradas, nr.CommitIndex}
+                        sendHeartbeat(nr, node, &result, &entrada)
+                    }
+                }
+            }(i)
+        }
+    }
 }
 
-
-// sendEntries envía las entradas de log al nodo identificado por 'node' utilizando una llamada remota.
-// Devuelve true si el envío fue exitoso, de lo contrario devuelve false.
+// sendEntries sends log entries to the node identified by 'node' using a remote call.
+// Returns true if the sending was successful, otherwise returns false.
 func sendEntries(nr *NodoRaft, node int, result *ResultsAE, entrada *ArgAppendEntries) bool {
-	// Verificar si el nodo está vivo antes de intentar enviar entradas de log
-	if !nr.alive {
-		time.Sleep(400 * time.Millisecond)
-		nr.Logger.Printf("No se ha podido enviar entries a %d porque está muerto\n", node)
-		return false
-	}
+    // Check if the node is alive before attempting to send log entries
+    if !nr.alive {
+        time.Sleep(400 * time.Millisecond)
+        nr.Logger.Printf("Could not send entries to %d because it is dead\n", node)
+        return false
+    }
 
-	// Realizar una llamada remota para enviar entradas de log al nodo identificado por 'node'
-	err := nr.Nodos[node].CallTimeout("NodoRaft.AppendEntries", entrada, result, 700*time.Millisecond)
+    // Perform a remote call to send log entries to the node identified by 'node'
+    err := nr.Nodos[node].CallTimeout("NodoRaft.AppendEntries", entrada, result, 700*time.Millisecond)
 
-	// Si la llamada remota es exitosa, se actualizan los valores de NextIndex y MatchIndex del nodo destino.
-	if result.Success {
-		nr.Mux.Lock()
+    // If the remote call is successful, update NextIndex and MatchIndex values of the destination node.
+    if result.Success {
+        nr.Mux.Lock()
 
-		// Actualizar el NextIndex y el MatchIndex del nodo destino
-		nr.NextIndex[node] += len(entrada.Entries)
-		nr.MatchIndex[node] = result.MatchIndex
+        // Update the NextIndex and MatchIndex of the destination node
+        nr.NextIndex[node] += len(entrada.Entries)
+        nr.MatchIndex[node] = result.MatchIndex
 
-		if nr.CommitIndex < nr.MatchIndex[node] {
-			nr.NumSucess++
+        if nr.CommitIndex < nr.MatchIndex[node] {
+            nr.NumSucess++
 
-			// Si la mayoría de los nodos han replicado la entrada, se realiza un commit y se actualiza el CommitIndex.
-			if nr.NumSucess >= len(nr.Nodos)/2 {
-				// Actualizar el CommitIndex y reiniciar el contador de nodos con éxito
-				nr.CommitIndex += len(entrada.Entries)
-				nr.NumSucess = 0
-				nr.Logger.Printf("CommitIndex actualizado, ahora es: %d.\n", nr.CommitIndex)
-			}
-		}
+            // If the majority of nodes have replicated the entry, commit and update CommitIndex.
+            if nr.NumSucess >= len(nr.Nodos)/2 {
+                nr.CommitIndex += len(entrada.Entries)
+                nr.NumSucess = 0
+                nr.Logger.Printf("CommitIndex updated, now it is: %d.\n", nr.CommitIndex)
+            }
+        }
 
-		nr.Mux.Unlock()
+        nr.Mux.Unlock()
 
-	// Si la llamada remota no es exitosa y el resultado tiene un término mayor a cero, se decrementa el NextIndex.
-	} else if result.Term > 0 {
-		nr.NextIndex[node]--
-		nr.Logger.Printf("No ha habido éxito, se decrementa el NextIndex. Nuevo valor: %d\n", nr.NextIndex[node])
-	}
+    // If the remote call is unsuccessful and the result contains a term greater than zero, decrement NextIndex.
+    } else if result.Term > 0 {
+        nr.NextIndex[node]--
+        nr.Logger.Printf("Failed, decrementing NextIndex. New value: %d\n", nr.NextIndex[node])
+    }
 
-	return err == nil
+    return err == nil
 }
-	
 
-
-
-// sendHeartbeat envía un "heartbeat" al nodo especificado como parametro
-// Devuelve true si el envío fue exitoso, de lo contrario devuelve false.
+// sendHeartbeat sends a "heartbeat" to the specified node.
+// Returns true if the sending was successful, otherwise returns false.
 func sendHeartbeat(nr *NodoRaft, node int, result *ResultsAE, entrada *ArgAppendEntries) bool {
-	// Verificar si el nodo está vivo antes de enviar el "heartbeat"
-	if !nr.alive {
-		time.Sleep(400 * time.Millisecond)
-		nr.Logger.Printf("No se ha podido enviar heartbeat a %d porque está muerto\n", node)
-		return false
-	}
+    // Check if the node is alive before sending the heartbeat
+    if !nr.alive {
+        time.Sleep(400 * time.Millisecond)
+        nr.Logger.Printf("Could not send heartbeat to %d because it is dead\n", node)
+        return false
+    }
 
-	// Realizar una llamada remota para enviar el "heartbeat"
-	err := nr.Nodos[node].CallTimeout("NodoRaft.AppendEntries", entrada, result, 700*time.Millisecond)
+    // Perform a remote call to send the heartbeat
+    err := nr.Nodos[node].CallTimeout("NodoRaft.AppendEntries", entrada, result, 700*time.Millisecond)
 
-	// Volver a ser seguidor si se recibe un término mayor en el "heartbeat"
-	if nr.CurrentTerm < result.Term {
-		nr.CurrentTerm = result.Term
-		nr.IdLider = -1
-		nr.FollowerChan <- true
-		nr.Logger.Printf("Término mayor: Mi término es: %d, el suyo es: %d (vuelvo a ser seguidor)\n", nr.CurrentTerm, result.Term)
-	}
+    // Revert to follower if a larger term is received in the heartbeat
+    if nr.CurrentTerm < result.Term {
+        nr.CurrentTerm = result.Term
+        nr.IdLider = -1
+        nr.FollowerChan <- true
+        nr.Logger.Printf("Larger term received: My term is: %d, theirs is: %d (reverting to follower)\n", nr.CurrentTerm, result.Term)
+    }
 
-	return err == nil
+    return err == nil
 }
 
+// AppendEntries handles the AppendEntries RPC call.
+func (nr *NodoRaft) AppendEntries(args *ArgAppendEntries, results *ResultsAE) error {
+    if !nr.alive {
+        time.Sleep(400 * time.Millisecond)
+        return nil
+    }
 
+    nr.Mux.Lock()
+    nr.Logger.Printf("Received AppendEntries, args: %v\n", args)
 
-	type ArgAppendEntries struct {
-		LeaderTerm     int 		// Termino del lider
-		LeaderId int 			// Id del lider
-		PrevLogIndex	int		// Indice del registro previo al nuevo
-		PrevLogTerm		int		// Termino del registro previo al nuevo
-		Entries      []Entry 	// Entradas de registro a replicar
-		LeaderCommit int   		// Indice del registro mas alto conocido que se ha comprometido
-	}
-	
-	type ResultsAE struct {
-		Term    int  			// Termino actual del nodo para que el candidato se actualice
-		Success bool 			// True si el voto se ha concedido
-		MatchIndex int 			// Indice del registro mas alto conocido que se ha replicado en el cluster
-	}
-	
-	// Metodo de tratamiento de llamadas RPC AppendEntries
-	func (nr *NodoRaft) AppendEntries(args *ArgAppendEntries, results *ResultsAE) error {
-		if !nr.alive {
-			time.Sleep(400 * time.Millisecond)
-			return nil
-		}
+    // 1: Reply false if term < currentTerm
+    if nr.CurrentTerm > args.LeaderTerm {
+        nr.Logger.Printf("Their term is: %d, mine is: %d. Replying false", args.LeaderTerm, nr.CurrentTerm)
+        results.Success = false
+        results.Term = nr.CurrentTerm
+        results.MatchIndex = 0
+        nr.Mux.Unlock()
+        return nil
+    }
 
-		nr.Mux.Lock()
-		nr.Logger.Printf("Recibo AppendEntries, args: %v\n", args)
+    // 2: Reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
+    if len(nr.Log) > 0 && args.PrevLogIndex > -1 && len(nr.Log) < args.PrevLogIndex {
+        nr.Logger.Printf("Their LastApplied is: %d, mine is: %d", args.PrevLogIndex, nr.LastApplied)
+        results.Success = false
+        results.Term = nr.CurrentTerm
+        results.MatchIndex = 0
+        nr.Mux.Unlock()
+        return nil
+    }
 
-		// 1:  Reply false if term < currentTerm
-		if nr.CurrentTerm > args.LeaderTerm {
-			nr.Logger.Printf("Su mandato es: %d, el mío es: %d. Por tanto le devuelvo dalso", args.LeaderTerm, nr.CurrentTerm)
-			results.Success = false
-			results.Term = nr.CurrentTerm
-			results.MatchIndex = 0
-			nr.Mux.Unlock()
-			return nil
-		}
+    // 3: If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it
+    if len(nr.Log) > 0 && args.PrevLogIndex > -1 && nr.Log[args.PrevLogIndex-1].Term != args.PrevLogTerm {
+        results.Success = false
+        results.Term = nr.CurrentTerm
+        results.MatchIndex = 0
+        nr.Log = nr.Log[:args.PrevLogIndex]
+        nr.LastApplied = max(0, len(nr.Log)-1)
+        nr.Logger.Printf("Conflict entry. Entry: %v\n", args)
+        nr.Mux.Unlock()
+        return nil
+    }
 
-		// 2. Reply false if log doesnt contain an entry at prevLogIndex whose term matches prevLogTerm
-		if len(nr.Log) > 0 && args.PrevLogIndex > -1 && len(nr.Log) < args.PrevLogIndex {
-			nr.Logger.Printf("Su LastApplied es: %d, el mío es: %d", args.PrevLogIndex, nr.LastApplied)
-			results.Success = false
-			results.Term = nr.CurrentTerm
-			results.MatchIndex = 0
-			nr.Mux.Unlock()
-			return nil
-		}
+    results.Success = true
+    results.Term = args.LeaderTerm
+    nr.IdLider = args.LeaderId
+    nr.CurrentTerm = args.LeaderTerm
 
-		// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it
-		if len(nr.Log) > 0 && args.PrevLogIndex > -1 && nr.Log[args.PrevLogIndex-1].Term != args.PrevLogTerm {
-			results.Success = false
-			results.Term = nr.CurrentTerm
-			results.MatchIndex = 0
-			nr.Log = nr.Log[:args.PrevLogIndex]
-			nr.LastApplied = max(0, len(nr.Log)-1)
-			nr.Logger.Printf("Entrada bajo conflicto. Entrada: %v\n", args)
-			nr.Mux.Unlock()
-			return nil
-		}
+    // 4: Append any new entries not already in the log
+    if len(args.Entries) > 0 {
+        nr.Log = append(nr.Log, args.Entries...)
+        nr.Logger.Printf("New entries added to log: %v\n", args.Entries)
+    }
+    results.MatchIndex = len(nr.Log)
 
-		results.Success = true
-		results.Term = args.LeaderTerm
-		nr.IdLider = args.LeaderId
-		nr.CurrentTerm = args.LeaderTerm
+    // 5: If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+    if nr.CommitIndex < args.LeaderCommit {
+        nr.CommitIndex = min(args.LeaderCommit, len(nr.Log))
+        nr.Logger.Printf("CommitIndex updated to: %d\n", nr.CommitIndex)
+    }
 
-		// 4. Append any new entries not already in the log
-		if len(args.Entries) > 0 {
-			nr.Log = append(nr.Log, args.Entries...)
-			nr.Logger.Printf("Se han añadido entradas al log: %v\n", args.Entries)
-		}
-		results.MatchIndex = len(nr.Log)
+    nr.Heartbeat <- true
+    nr.Mux.Unlock()
 
-		// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry
-		if nr.CommitIndex < args.LeaderCommit {
-			nr.CommitIndex = min(args.LeaderCommit,len(nr.Log))
-			nr.Logger.Printf("Se ha actualizado el commitIndex a: %d\n", nr.CommitIndex)
-		}
+    return nil
+}
 
-		nr.Heartbeat <- true
-		nr.Mux.Unlock()
+// max returns the maximum between two integer numbers.
+func max(a, b int) int {
+    if a > b {
+        return a
+    }
+    return b
+}
 
-		return nil
-	}
+// min returns the minimum between two integer numbers.
+func min(a, b int) int {
+    if a < b {
+        return a
+    }
+    return b
+}
 
-	
-	// max devuelve el máximo entre dos números enteros.
-	func max(a, b int) int {
-		if a > b {
-			return a
-		}
-		return b
-	}
+// generateTimeout generates a random time duration between 200 and 500 milliseconds.
+// This time range is recommended in the paper.
+func generateTimeout() time.Duration {
+    return time.Duration(rand.Intn(200)+300) * time.Millisecond
+}
 
-	// min devuelve el mínimo entre dos números enteros.
-	func min(a, b int) int {
-		if a < b {
-			return a
-		}
-		return b
-	}
-	
+// KillNode stops the current node and marks its state as inactive.
+func (nr *NodoRaft) KillNode(args Vacio, reply *Vacio) error {
+    nr.alive = false
+    nr.Logger.Printf("Node %d killed\n", nr.Yo)
+    return nil
+}
 
-	// generarTimeout genera un valor de tiempo aleatorio entre 200 y 500 milisegundos.
-	// Este rango de tiempo se recomienda en el paper.
-	func generarTimeout() time.Duration {
-		return time.Duration(rand.Intn(200)+300) * time.Millisecond
-	}
-	
-	
-	
-	// KillNode detiene el nodo actual y marca su estado como no activo.
-	func (nr *NodoRaft) KillNode(args Vacio, reply *Vacio) error {
-		nr.alive = false
-		nr.Logger.Printf("Nodo %d muerto\n", nr.Yo)
-		return nil
-	}
-	
-	// ReviveNode revive un nodo Raft que estaba previamente marcado como no vivo.
-	// Este método establece el atributo "alive" en true y registra un mensaje de registro indicando que el nodo ha sido revivido.
-	func (nr *NodoRaft) ReviveNode(args Vacio, reply *Vacio) error {
-		nr.alive = true
-		nr.Logger.Printf("Nodo %d revivido\n", nr.Yo)
-		return nil
-	}
+// ReviveNode revives a Raft node that was previously marked as inactive.
+// This method sets the "alive" attribute to true and logs a message indicating that the node has been revived.
+func (nr *NodoRaft) ReviveNode(args Vacio, reply *Vacio) error {
+    nr.alive = true
+    nr.Logger.Printf("Node %d revived\n", nr.Yo)
+    return nil
+}

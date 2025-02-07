@@ -1,10 +1,5 @@
 /*
-* AUTOR: Rafael Tolosana Calasanz
-* ASIGNATURA: 30221 Sistemas Distribuidos del Grado en Ingeniería Informática
-*			Escuela de Ingeniería y Arquitectura - Universidad de Zaragoza
-* FECHA: septiembre de 2021
-* FICHERO: ms_test.go
-* DESCRIPCIÓN: Implementación de un sistema de mensajería asíncrono, insipirado en el Modelo Actor
+* DESCRIPTION: Implementation of an asynchronous messaging system, inspired by the Actor Model.
 */
 package ms
 
